@@ -1,130 +1,133 @@
 # scanner/scan.py
-# High-value automated scanner for normalized targets.
+# Async HTTP scanner for high-value programs defined in programs.json
 
+import asyncio
 import json
 import os
 import sys
 from datetime import datetime
 
-# Ensure the repo root is on sys.path so engine imports resolve
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import aiohttp
 
-# HIGH-VALUE ENGINES ONLY - import using their actual public function names
-import idor_engine
-import ssrf_engine
-import auth_bypass_engine
-import rate_limit_engine
-import sensitive_data_engine
-import jwt_engine
+# Ensure repo root on path
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
-OUTPUT_DIR = "data"
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, "scan_results.json")
+OUTPUT_DIR = os.path.join(ROOT, "data")
 
 
-def scan_target(url):
-    """Run only payout-worthy checks on a single target."""
+async def fetch(session, url, timeout=10):
+    try:
+        async with session.get(url, timeout=timeout) as resp:
+            text = await resp.text(errors="ignore")
+            return {
+                "status": resp.status,
+                "url": str(resp.url),
+                "headers": dict(resp.headers),
+                "body_sample": text[:4096],
+            }
+    except Exception as e:
+        return {
+            "status": None,
+            "url": url,
+            "error": str(e),
+        }
+
+
+async def scan_target(session, program, target):
+    """Basic HTTP probe for a single target."""
+    print(f"[scanner] Probing {target}")
+    result = await fetch(session, target)
+
+    finding = {
+        "program": program.get("name", "Unknown Program"),
+        "program_id": program.get("id", "unknown"),
+        "target": target,
+        "status": result.get("status"),
+        "url": result.get("url"),
+        "error": result.get("error"),
+        "headers": result.get("headers"),
+        "body_sample": result.get("body_sample"),
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+    }
+
+    return finding
+
+
+async def scan_program(program, concurrency=10):
+    """Scan all normalized_scope targets for a single program."""
+    targets = program.get("normalized_scope", [])
+    if not targets:
+        print(f"[scanner] Program {program.get('name')} has no normalized_scope")
+        return []
+
+    connector = aiohttp.TCPConnector(ssl=False)
+    timeout = aiohttp.ClientTimeout(total=20)
+
     findings = []
+    sem = asyncio.Semaphore(concurrency)
 
-    # Each engine exposes a `scan(target, http_client)` or `analyze(target, records)`.
-    # We call them with a None http_client / empty records; engines return [] when
-    # they have nothing actionable, which is safe for a static/offline run.
-    engine_calls = [
-        (ssrf_engine,          lambda: ssrf_engine.scan(url, None)),
-        (auth_bypass_engine,   lambda: auth_bypass_engine.scan(url, None)),
-        (rate_limit_engine,    lambda: rate_limit_engine.scan(url, None)),
-        (sensitive_data_engine, lambda: sensitive_data_engine.scan(url, None)),
-        (jwt_engine,           lambda: jwt_engine.scan(url, None)),
-        (idor_engine,          lambda: idor_engine.analyze(url, [])),
-    ]
+    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
 
-    for engine_mod, call in engine_calls:
-        try:
-            results = call()
-            if results:
-                for r in results:
-                    r.setdefault("engine", engine_mod.__name__)
-                findings.extend(results)
-        except Exception as e:
-            print(f"[scanner] Engine {engine_mod.__name__} error on {url}: {e}")
+        async def worker(t):
+            async with sem:
+                return await scan_target(session, program, t)
+
+        tasks = [worker(t) for t in targets]
+        for coro in asyncio.as_completed(tasks):
+            finding = await coro
+            findings.append(finding)
 
     return findings
 
 
-def save_findings(program, findings):
-    """Save findings for a program into a clean JSON file."""
+def save_program_findings(program, findings):
     if not findings:
         return
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     date = datetime.utcnow().strftime("%Y-%m-%d")
-
     program_id = program.get("id", program.get("name", "unknown")).replace(" ", "_")
     filename = f"{program_id}-{date}.json"
     path = os.path.join(OUTPUT_DIR, filename)
 
-    output = []
-    for f in findings:
-        output.append({
-            "severity": f.get("severity", "HIGH"),
-            "title": f.get("title", "Unknown finding"),
-            "target": f.get("target"),
-            "program": program.get("name", "Unknown Program"),
-            "date": date,
-            "details": f.get("details", {}),
-        })
+    with open(path, "w", encoding="utf-8") as fp:
+        json.dump(findings, fp, indent=2)
 
-    with open(path, "w") as fp:
-        json.dump(output, fp, indent=4)
-
-    print(f"[scanner] Saved: {path}")
+    print(f"[scanner] Saved {len(findings)} findings for {program_id} to {path}")
 
 
-def scan_program(program):
-    """Scan all normalized targets for a single program."""
-    targets = program.get("normalized_scope", [])
+async def run():
+    programs_file = os.path.join(ROOT, "programs.json")
+    if not os.path.exists(programs_file):
+        print(f"[scanner] No programs.json at {programs_file}, exiting with 0 findings")
+        return []
+
+    with open(programs_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    programs = data.get("programs", [])
+    print(f"[scanner] Loaded {len(programs)} programs")
+
     all_findings = []
 
-    for target in targets:
-        print(f"[scanner] Scanning target: {target}")
-        findings = scan_target(target)
-
-        for f in findings:
-            f["target"] = target
-
+    for program in programs:
+        print(f"[scanner] Scanning program: {program.get('name')}")
+        findings = await scan_program(program)
+        save_program_findings(program, findings)
         all_findings.extend(findings)
 
+    # Also write a global combined file for your aggregator/pipeline
+    combined_path = os.path.join(OUTPUT_DIR, "scan_results.json")
+    with open(combined_path, "w", encoding="utf-8") as f:
+        json.dump(all_findings, f, indent=2)
+
+    print(f"[scanner] Wrote {len(all_findings)} total findings to {combined_path}")
     return all_findings
 
 
 def main():
-    """Entry point: load programs.json, scan each program, write scan_results.json."""
-    # Paths relative to repo root regardless of cwd
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    programs_file = os.path.join(root, "programs.json")
-    output_path = os.path.join(root, OUTPUT_FILE)
-
-    os.makedirs(os.path.join(root, OUTPUT_DIR), exist_ok=True)
-
-    if not os.path.exists(programs_file):
-        print(f"[scanner] No programs.json found at {programs_file}, writing empty scan_results.json")
-        scan_results = []
-    else:
-        with open(programs_file, "r") as f:
-            data = json.load(f)
-        programs = data.get("programs", [])
-        print(f"[scanner] Loaded {len(programs)} programs")
-
-        scan_results = []
-        for program in programs:
-            if isinstance(program, str):
-                program = {"name": program, "normalized_scope": [program]}
-            findings = scan_program(program)
-            scan_results.extend(findings)
-
-    with open(output_path, "w") as f:
-        json.dump(scan_results, f, indent=4)
-
-    print(f"[scanner] Wrote {len(scan_results)} findings to {output_path}")
+    asyncio.run(run())
 
 
 if __name__ == "__main__":
