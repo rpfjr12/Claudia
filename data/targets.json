@@ -1,0 +1,23 @@
+{
+  "targets": [
+    "https://www.coinbase.com",
+    "https://www.kraken.com",
+    "https://www.binance.com",
+    "https://www.gemini.com",
+    "https://www.bitfinex.com",
+    "https://www.bitstamp.net",
+    "https://www.kucoin.com",
+    "https://www.revolut.com",
+    "https://www.robinhood.com",
+    "https://www.paypal.com",
+    "https://stripe.com",
+    "https://www.cloudflare.com",
+    "https://www.digitalocean.com",
+    "https://www.shopify.com",
+    "https://www.dropbox.com",
+    "https://www.gitlab.com",
+    "https://www.fastly.com",
+    "https://www.okta.com",
+    "https://www.squareup.com"
+  ]
+}
