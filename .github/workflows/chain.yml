@@ -1,39 +1,47 @@
-name: SystemFixer Daily Scan
+name: Vulnerability Pipeline
 
 on:
+  push:
+    branches:
+      - main
+  pull_request:
   workflow_dispatch:
-  schedule:
-    - cron: "0 6 * * *"
+
+permissions:
+  contents: write
 
 jobs:
-  run-systemfixer:
+  pipeline:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies (if any)
+      - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
-          else
-            echo "No requirements.txt found, continuing..."
           fi
 
-      - name: Run SystemFixer pipeline
-        run: |
-          python pipeline.py
+      - name: Run pipeline
+        run: python pipeline.py
 
-      - name: Commit and push results
+      - name: Commit scan results
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
+
           git add .
-          git commit -m "Automated SystemFixer scan update" || echo "No changes to commit"
+
+          git diff --cached --quiet || git commit -m "Automated SystemFixer scan update"
+
           git push
