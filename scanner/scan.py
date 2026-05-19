@@ -1,6 +1,6 @@
 # scanner/scan.py
 # Async HTTP scanner for high-value programs defined in programs.json
-
+from scanner.analysis_engine import analyze_response
 import asyncio
 import json
 import os
