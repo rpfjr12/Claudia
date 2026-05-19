@@ -1,0 +1,10 @@
+{
+    "example_program": {
+        "exclude_tags": ["xss", "csrf"],
+        "severity_boosts": {
+            "LOW": "MEDIUM",
+            "MEDIUM": "HIGH"
+        },
+        "money_boost": 10
+    }
+}
