@@ -1,6 +1,6 @@
 # scanner/scan.py
-# Async HTTP scanner for high-value programs defined in programs.json
-from scanner.analysis_engine import analyze_response
+# Async HTTP analyzer for high-value programs defined in programs.json
+
 import asyncio
 import json
 import os
@@ -14,6 +14,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 OUTPUT_DIR = os.path.join(ROOT, "data")
+
+# Safe analysis engine
+from scanner.analysis_engine import analyze_response
 
 
 async def fetch(session, url, timeout=10):
@@ -31,13 +34,56 @@ async def fetch(session, url, timeout=10):
             "status": None,
             "url": url,
             "error": str(e),
+            "headers": {},
+            "body_sample": "",
         }
 
 
+def score_interest(analysis):
+    """
+    Safe heuristic scoring for "interesting" targets.
+    This is NOT a vulnerability score.
+    It just helps you prioritize manual review.
+    """
+
+    score = 0
+
+    status_cat = analysis.get("status_category")
+    tech_signals = analysis.get("tech_signals", [])
+    keyword_flags = analysis.get("keyword_flags", [])
+    content_length = analysis.get("content_length", 0)
+
+    # Status-based interest
+    if status_cat in ("server-error", "client-error"):
+        score += 3
+    elif status_cat == "success":
+        score += 2
+    elif status_cat == "redirect":
+        score += 1
+
+    # Tech signals (frameworks / platforms)
+    score += min(len(tech_signals), 5)
+
+    # Debug/error keywords
+    score += min(len(keyword_flags) * 2, 10)
+
+    # Longer content can be more interesting to inspect
+    if content_length > 5000:
+        score += 2
+    if content_length > 20000:
+        score += 2
+
+    return score
+
+
 async def scan_target(session, program, target):
-    """Basic HTTP probe for a single target."""
+    """Analyze a single target and enrich with safe metadata."""
     print(f"[scanner] Probing {target}")
     result = await fetch(session, target)
+
+    # Safe content + header analysis
+    analysis = analyze_response(result)
+    interest_score = score_interest(analysis)
 
     finding = {
         "program": program.get("name", "Unknown Program"),
@@ -49,6 +95,8 @@ async def scan_target(session, program, target):
         "headers": result.get("headers"),
         "body_sample": result.get("body_sample"),
         "timestamp": datetime.utcnow().isoformat() + "Z",
+        "analysis": analysis,
+        "interest_score": interest_score,
     }
 
     return finding
@@ -78,6 +126,8 @@ async def scan_program(program, concurrency=10):
             finding = await coro
             findings.append(finding)
 
+    # Sort by interest_score descending for easier manual triage
+    findings.sort(key=lambda f: f.get("interest_score", 0), reverse=True)
     return findings
 
 
@@ -118,6 +168,7 @@ async def run():
         all_findings.extend(findings)
 
     # Also write a global combined file for your aggregator/pipeline
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     combined_path = os.path.join(OUTPUT_DIR, "scan_results.json")
     with open(combined_path, "w", encoding="utf-8") as f:
         json.dump(all_findings, f, indent=2)
